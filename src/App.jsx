@@ -1,6 +1,8 @@
-import { useState, useCallback } from "react";
+import React, { useState, useCallback, useEffect, useRef } from "react";
 
-const DICT_API = "https://api.dictionaryapi.dev/api/v2/entries/en/";
+const DICT_API     = "https://api.dictionaryapi.dev/api/v2/entries/en/";
+const DATAMUSE_API = "https://api.datamuse.com/words";
+const WIKI_API     = "https://en.wikipedia.org/api/rest_v1/page/summary/";
 
 const C = {
   bg:       "#0c0c14",
@@ -13,16 +15,16 @@ const C = {
   gold:     "#d4a84c",
   goldDim:  "#6a5020",
   green:    "#4db88a",
-  nodeColors: [
-    "#d4a84c","#5b8fd4","#9b6fd4","#4db88a",
-    "#d47a4d","#4db8d4","#d44d7a","#8ab84d",
-  ],
+  blue:     "#5b8fd4",
+  purple:   "#9b6fd4",
+  red:      "#d44d4d",
+  nodeColors: ["#d4a84c","#5b8fd4","#9b6fd4","#4db88a","#d47a4d","#4db8d4","#d44d7a","#8ab84d"],
 };
 const nc  = (d) => C.nodeColors[d % C.nodeColors.length];
 const lbl = (d) => d === 0 ? "ROOT" : `G·${d}`;
 const INDENT = 28;
 
-// ─── Dictionary helpers ───────────────────────────────────────────────────────
+// ─── Wiktionary ───────────────────────────────────────────────────────────────
 const STOP = new Set([
   "the","a","an","is","are","of","to","in","for","on","with","as","by","from",
   "that","which","this","it","be","or","and","not","but","have","had","has",
@@ -37,94 +39,68 @@ const STOP = new Set([
 
 function parseGD(raw) {
   if (!raw) return { genus: "—", differentia: "—" };
-  // Strip leading article, trailing period
-  let def = raw.replace(/^(the|a|an)\s+/i, "").replace(/\.$/, "").trim();
-
-  // Strip leading adverbial modifiers (e.g. "legally or socially binding X" → "binding X")
-  // Words ending in -ly, or connectives like "or"/"and" before the real noun phrase
-  def = def.replace(/^((?:\w+ly\s+|or\s+|and\s+)+)/i, "").trim();
-
-  // 1. Strong relational markers — split here
-  const strong = [" that "," which "," who "," whose ",
-    " consisting of "," characterized by ",
-    " used to "," used for "," designed to "," designed for ",
+  let def = raw.replace(/^(the|a|an)\s+/i,"").replace(/\.$/,"").trim();
+  def = def.replace(/^((?:\w+ly\s+|or\s+|and\s+)+)/i,"").trim();
+  const strong = [" that "," which "," who "," whose "," consisting of ",
+    " characterized by "," used to "," used for "," designed to "," designed for ",
     " intended to "," intended for "];
   for (const m of strong) {
     const i = def.indexOf(m);
-    if (i > 2 && i < 80) return { genus: def.slice(0, i).trim(), differentia: def.slice(i + m.length).trim() };
+    if (i > 2 && i < 80) return { genus: def.slice(0,i).trim(), differentia: def.slice(i+m.length).trim() };
   }
-
-  // 2. Find head noun: look for first preposition ("of","for","in",...) but only
-  //    after we've seen at least one real word (skip adj chains).
-  //    We want the noun phrase up to the first preposition.
   const words = def.split(" ");
-  const PREPS = new Set(["of","for","in","by","with","about","from","between","among","relating","void","payable","regulated","toward","towards","into","onto","upon","through","without","within"]);
+  const PREPS = new Set(["of","for","in","by","with","about","from","between","among",
+    "relating","void","payable","regulated","toward","towards","into","onto","upon","through","without","within"]);
   let nounEnd = -1;
   for (let i = 0; i < words.length; i++) {
-    const w = words[i].toLowerCase().replace(/,.*$/, "");
+    const w = words[i].toLowerCase().replace(/,.*$/,"");
     if (i > 0 && PREPS.has(w)) { nounEnd = i; break; }
   }
   if (nounEnd > 0 && nounEnd <= 6) {
-    const genus = words.slice(0, nounEnd).join(" ").replace(/,$/, "").trim();
+    const genus = words.slice(0,nounEnd).join(" ").replace(/,$/,"").trim();
     const differentia = words.slice(nounEnd).join(" ").trim();
     if (genus && differentia) return { genus, differentia };
   }
-
-  // 3. Comma split — first clause as genus if short
   const comma = def.indexOf(",");
-  if (comma > 4 && comma < 50) {
-    return { genus: def.slice(0, comma).trim(), differentia: def.slice(comma + 1).trim() };
-  }
-
-  // 4. Semicolon split
+  if (comma > 4 && comma < 50) return { genus: def.slice(0,comma).trim(), differentia: def.slice(comma+1).trim() };
   const semi = def.indexOf(";");
-  if (semi > 4 && semi < 50) return { genus: def.slice(0, semi).trim(), differentia: def.slice(semi + 1).trim() };
-
-  // 5. Fallback: first 1-3 words as genus
-  const cut = words.length <= 4 ? 1 : Math.min(2, Math.max(1, Math.floor(words.length / 5)));
-  return { genus: words.slice(0, cut).join(" "), differentia: words.slice(cut).join(" ") || "—" };
+  if (semi > 4 && semi < 50) return { genus: def.slice(0,semi).trim(), differentia: def.slice(semi+1).trim() };
+  const cut = words.length <= 4 ? 1 : Math.min(2, Math.max(1, Math.floor(words.length/5)));
+  return { genus: words.slice(0,cut).join(" "), differentia: words.slice(cut).join(" ") || "—" };
 }
 
-function extractTerms(definition, concept, synonyms = []) {
-  const skip = new Set([...STOP, concept.toLowerCase(), ...synonyms.map(s => s.toLowerCase())]);
-  const words = definition.replace(/[^a-zA-Z\s-]/g, " ").split(/\s+/)
-    .map(w => w.toLowerCase().replace(/^-|-$/g, ""))
+function extractTerms(definition, concept, synonyms=[]) {
+  const skip = new Set([...STOP, concept.toLowerCase(), ...synonyms.map(s=>s.toLowerCase())]);
+  const words = definition.replace(/[^a-zA-Z\s-]/g," ").split(/\s+/)
+    .map(w => w.toLowerCase().replace(/^-|-$/g,""))
     .map(w => {
-      // Convert adverbs to their root adjective/noun form
-      if (w.endsWith('ily') && w.length > 4) return w.slice(0, -3) + 'y'; // happily→happy
-      if (w.endsWith('ly') && w.length > 4)  return w.slice(0, -2);        // legally→legal, reciprocally→reciprocal
+      if (w.endsWith("ily") && w.length > 4) return w.slice(0,-3)+"y";
+      if (w.endsWith("ly")  && w.length > 4) return w.slice(0,-2);
       return w;
     })
     .filter(w => w.length >= 3 && !skip.has(w));
   const seen = new Set(); const out = [];
-  // All unique non-stopword terms, longer words first
-  const longer = words.filter(w => w.length >= 5);
-  const shorter = words.filter(w => w.length < 5);
-  for (const w of [...longer, ...shorter]) {
+  for (const w of [...words.filter(w=>w.length>=5), ...words.filter(w=>w.length<5)])
     if (!seen.has(w)) { seen.add(w); out.push(w); }
-  }
   return out;
 }
 
-// Returns ALL senses, each with its own GD parse and keyTerms
 async function fetchAllSenses(concept) {
   const res = await fetch(DICT_API + encodeURIComponent(concept.toLowerCase()));
   if (!res.ok) throw new Error(res.status === 404 ? `"${concept}" not found` : `API error ${res.status}`);
   const entries = await res.json();
   const entry = entries[0];
   const phonetic = entry?.phonetic || "";
-
   const senses = [];
   for (const meaning of (entry?.meanings || [])) {
     for (const defObj of (meaning.definitions || [])) {
       if (!defObj.definition || defObj.definition.length < 8) continue;
       const { genus, differentia } = parseGD(defObj.definition);
-      const synonyms = (defObj.synonyms || []).concat(entry.synonyms || []);
+      const synonyms = (defObj.synonyms||[]).concat(entry.synonyms||[]);
       senses.push({
         pos: meaning.partOfSpeech,
         text: defObj.definition,
-        genus,
-        differentia,
+        genus, differentia,
         example: defObj.example || null,
         keyTerms: extractTerms(defObj.definition, concept, synonyms),
       });
@@ -134,126 +110,376 @@ async function fetchAllSenses(concept) {
   return { concept, phonetic, senses };
 }
 
+// ─── Datamuse semantic enrichment ─────────────────────────────────────────────
+// rel_gen = hypernyms (more general — genus chain)
+// rel_spc = hyponyms (more specific kinds)
+// rel_ant = antonyms
+// rel_syn = synonyms
+// rel_sim = similar-to (loose synonyms / near-synonyms)
+// rel_trg = triggers (strongly associated concepts)
+// rel_jjb = adjectives describing this noun (properties)
+// rel_com = comprises (this is made up of X — holonym)
+// rel_par = part of (this is a part of X — meronym)
+async function fetchDatamuse(concept) {
+  const word = encodeURIComponent(concept.toLowerCase());
+  const calls = [
+    fetch(`${DATAMUSE_API}?rel_gen=${word}&max=12`).then(r=>r.json()),
+    fetch(`${DATAMUSE_API}?rel_spc=${word}&max=16`).then(r=>r.json()),
+    fetch(`${DATAMUSE_API}?rel_ant=${word}&max=10`).then(r=>r.json()),
+    fetch(`${DATAMUSE_API}?rel_syn=${word}&max=10`).then(r=>r.json()),
+    fetch(`${DATAMUSE_API}?rel_sim=${word}&max=8`).then(r=>r.json()),
+    fetch(`${DATAMUSE_API}?rel_trg=${word}&max=10`).then(r=>r.json()),
+    fetch(`${DATAMUSE_API}?rel_jjb=${word}&max=10`).then(r=>r.json()),
+    fetch(`${DATAMUSE_API}?rel_com=${word}&max=10`).then(r=>r.json()),
+    fetch(`${DATAMUSE_API}?rel_par=${word}&max=8`).then(r=>r.json()),
+  ];
+  const [genR,spcR,antR,synR,simR,trgR,jjbR,comR,parR] = await Promise.allSettled(calls);
+  const labels = res => res.status === "fulfilled"
+    ? (res.value || []).map(x => x.word).filter(Boolean)
+    : [];
+  return {
+    isA:       labels(genR),   // hypernyms — genus chain upward
+    hyponyms:  labels(spcR),   // hyponyms — specific kinds / concrete units
+    antonyms:  labels(antR),   // antonyms — contrasting concepts
+    synonyms:  [...new Set([...labels(synR), ...labels(simR)])].slice(0,12), // synonyms + similar
+    usedFor:   labels(trgR),   // associated / trigger concepts
+    properties:labels(jjbR),   // adjectives = differentia candidates
+    comprises: labels(comR),   // holonyms — things this contains
+    partOf:    labels(parR),   // meronyms — things this is part of
+  };
+}
+
+// ─── Wikipedia ────────────────────────────────────────────────────────────────
+async function fetchWikiSummary(concept) {
+  const slug = concept.trim().replace(/\s+/g,"_");
+  const res = await fetch(`${WIKI_API}${encodeURIComponent(slug)}`);
+  if (!res.ok) return null;
+  const data = await res.json();
+  if (data.type === "disambiguation") return null;
+  return {
+    extract: (data.extract || "").slice(0,600),
+    url: data.content_urls?.desktop?.page || null,
+  };
+}
+
 // ─── Dots ─────────────────────────────────────────────────────────────────────
 function Dots({ color }) {
   return (
-    <span style={{ display:"inline-flex", gap:3, verticalAlign:"middle", marginRight:4 }}>
-      {[0,1,2].map(i => (
-        <span key={i} style={{
-          display:"inline-block", width:4, height:4, borderRadius:"50%",
-          background:color, animation:`pulse 1.1s ease-in-out ${i*0.2}s infinite`,
-        }}/>
+    <span style={{ display:"inline-flex", gap:3, verticalAlign:"middle", marginRight:6 }}>
+      {[0,1,2].map(i=>(
+        <span key={i} style={{ display:"inline-block", width:5, height:5, borderRadius:"50%",
+          background:color, animation:`pulse 1.1s ease-in-out ${i*0.2}s infinite` }}/>
       ))}
     </span>
   );
 }
 
-// ─── Sense picker panel ───────────────────────────────────────────────────────
-// Shows all senses; user clicks one → becomes the active definition and branches
-function SensePicker({ data, depth, chosenSenseIdx, onChoose }) {
+// ─── Tag pill ─────────────────────────────────────────────────────────────────
+function Tag({ label, color, onPin, pinned }) {
+  const [hov, setHov] = useState(false);
+  return (
+    <span
+      onClick={e => { e.stopPropagation(); onPin && !pinned && onPin(label); }}
+      onMouseEnter={() => setHov(true)}
+      onMouseLeave={() => setHov(false)}
+      style={{
+        fontSize:12, padding:"4px 12px",
+        background: pinned ? `${color}35` : hov && onPin ? `${color}28` : `${color}18`,
+        border:`1px solid ${pinned ? color : hov && onPin ? `${color}80` : `${color}45`}`,
+        borderRadius:14, color, fontFamily:"'Georgia',serif",
+        display:"inline-flex", alignItems:"center", gap:5, lineHeight:1.4,
+        cursor: onPin && !pinned ? "pointer" : "default",
+        transition:"all 0.12s", userSelect:"none",
+      }}>
+      {label}
+      {onPin && !pinned && (
+        <span style={{ fontSize:10, opacity: hov ? 0.9 : 0.35, transition:"opacity 0.12s" }}>＋</span>
+      )}
+      {pinned && <span style={{ fontSize:10, opacity:0.7 }}>✓</span>}
+    </span>
+  );
+}
+
+// ─── Enrichment panel — shown immediately on node expand ──────────────────────
+function EnrichmentPanel({ concept, depth, indent, onPin, pinned }) {
   const color = nc(depth);
-  const indent = depth * INDENT + (depth > 0 ? 16 : 0) + 22;
+  const [tab,     setTab]     = useState("isa");   // isa | kinds | props | wiki
+  const [cn,      setCn]      = useState(null);
+  const [wiki,    setWiki]    = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [error,   setError]   = useState(null);
+  const fetched = useRef(false);
+
+  useEffect(() => {
+    if (fetched.current) return;
+    fetched.current = true;
+    setLoading(true);
+    Promise.allSettled([fetchDatamuse(concept), fetchWikiSummary(concept)])
+      .then(([cnR, wikiR]) => {
+        const cnData = cnR.status === "fulfilled" ? cnR.value : null;
+        const wikiData = wikiR.status === "fulfilled" ? wikiR.value : null;
+        if (cnData)   setCn(cnData);
+        if (wikiData) setWiki(wikiData);
+        // auto-select first tab that has data
+        const firstWithData = ["isa","kinds","ant","syn","props","uses","comprises","partof"]
+          .find(k => {
+            const map = {isa:"isA",kinds:"hyponyms",ant:"antonyms",syn:"synonyms",
+              props:"properties",uses:"usedFor",comprises:"comprises",partof:"partOf"};
+            return cnData?.[map[k]]?.length > 0;
+          });
+        if (firstWithData) setTab(firstWithData);
+        else if (wikiData) setTab("wiki");
+        setLoading(false);
+      })
+      .catch(e => { setError(e.message); setLoading(false); });
+  }, [concept]);
+
+  const tabs = [
+    { id:"isa",      label:"Is a kind of",   count: cn?.isA?.length,        color: C.gold    },
+    { id:"kinds",    label:"Specific kinds", count: cn?.hyponyms?.length,   color: C.blue    },
+    { id:"ant",      label:"Antonyms",       count: cn?.antonyms?.length,   color: C.red     },
+    { id:"syn",      label:"Synonyms",       count: cn?.synonyms?.length,   color: C.green   },
+    { id:"props",    label:"Properties",     count: cn?.properties?.length, color: C.purple  },
+    { id:"uses",     label:"Associated",     count: cn?.usedFor?.length,    color: "#d4a84c" },
+    { id:"comprises",label:"Comprises",      count: cn?.comprises?.length,  color: "#4db8d4" },
+    { id:"partof",   label:"Part of",        count: cn?.partOf?.length,     color: "#d47a4d" },
+    { id:"wiki",     label:"Wikipedia",      count: wiki ? 1 : 0,           color: C.textMid },
+  ].filter(t => !loading && (t.count > 0));
+
+  const activeColor = tabs.find(t=>t.id===tab)?.color || color;
 
   return (
-    <div style={{
-      marginLeft: indent,
-      marginTop: 6, marginBottom: 10,
-      maxWidth: 620,
-      animation: "slideDown 0.15s ease",
-    }}>
-      {/* header */}
+    <div style={{ marginLeft:indent, marginTop:6, marginBottom:14, maxWidth:660,
+      animation:"slideDown 0.15s ease" }}>
+
+      {/* Panel header — always visible */}
       <div style={{
-        fontSize: 11, fontFamily: "monospace", color: C.textDim,
-        textTransform: "uppercase", letterSpacing: 1.5,
-        marginBottom: 8,
-        display: "flex", alignItems: "center", gap: 8,
+        background:"#0d0d1f", border:`1px solid ${color}50`,
+        borderRadius:"8px 8px 0 0", padding:"10px 14px",
+        display:"flex", alignItems:"center", gap:12, flexWrap:"wrap",
       }}>
-        <span style={{ color }}>"{data.concept}"</span>
-        {data.phonetic && <span style={{ color: C.textDim }}>{data.phonetic}</span>}
-        {chosenSenseIdx === null
-          ? <span>— choose a sense to branch from:</span>
-          : <span
-              onClick={(e) => { e.stopPropagation(); onChoose(null); }}
-              style={{ color: C.gold, cursor: "pointer", textDecoration: "underline", textDecorationStyle: "dotted" }}
-            >change sense</span>
-        }
+        <span style={{ fontSize:11, fontFamily:"monospace", fontWeight:700,
+          letterSpacing:1.5, textTransform:"uppercase", color }}>
+          ⬡ Semantic analysis
+        </span>
+        {loading && <><Dots color={color}/><span style={{ fontSize:11, color:C.textDim }}>
+          fetching ConceptNet + Wikipedia…</span></>}
+        {error && <span style={{ fontSize:11, color:C.red }}>⚠ {error}</span>}
+        {!loading && tabs.length === 0 && (
+          <span style={{ fontSize:11, color:C.textDim, fontStyle:"italic" }}>
+            no enrichment data found for "{concept}"
+          </span>
+        )}
+
+        {/* Tab buttons */}
+        {!loading && tabs.length > 0 && (
+          <div style={{ display:"flex", gap:4, flexWrap:"wrap" }}>
+            {tabs.map(t => (
+              <button key={t.id} onClick={e => { e.stopPropagation(); setTab(t.id); }}
+                style={{
+                  fontSize:10, fontFamily:"monospace", padding:"3px 10px",
+                  borderRadius:4, border:`1px solid ${tab===t.id ? t.color : C.border}`,
+                  background: tab===t.id ? `${t.color}22` : "transparent",
+                  color: tab===t.id ? t.color : C.textDim,
+                  cursor:"pointer", letterSpacing:0.5,
+                  transition:"all 0.12s",
+                }}>
+                {t.label}
+                <span style={{ marginLeft:5, opacity:0.6 }}>({t.count})</span>
+              </button>
+            ))}
+          </div>
+        )}
       </div>
 
-      {(chosenSenseIdx !== null ? [data.senses[chosenSenseIdx]] : data.senses).map((sense, i) => {
+      {/* Panel body */}
+      {!loading && tabs.length > 0 && (
+        <div style={{ background:C.panelAlt, border:`1px solid ${color}50`, borderTop:"none",
+          borderRadius:"0 0 8px 8px", padding:"14px 16px", minHeight:60 }}>
+
+          {/* helper to render a pill section */}
+          {(() => {
+            const activeTab = tabs.find(t=>t.id===tab) || tabs[0];
+            const tc = activeTab?.color || color;
+            const TagRow = ({items, c, note}) => items?.length > 0 ? (
+              <div>
+                <div style={{ display:"flex", flexWrap:"wrap", gap:6 }}>
+                  {items.map(t=><Tag key={t} label={t} color={c} onPin={onPin} pinned={pinned?.has(t)}/>)}
+                </div>
+                {note && <div style={{ fontSize:10, color:C.textDim, fontFamily:"monospace",
+                  marginTop:10, fontStyle:"italic" }}>{note}</div>}
+              </div>
+            ) : null;
+
+            const desc = (pre, word, post, c) => (
+              <div style={{ fontSize:11, color:C.textDim, marginBottom:10, lineHeight:1.6 }}>
+                {pre}<span style={{ color:c, fontStyle:"italic" }}>{word}</span>{post}
+              </div>
+            );
+
+            if (tab==="isa" && cn?.isA?.length > 0) return (
+              <div>
+                {desc("", concept, " is a kind of:", C.gold)}
+                <div style={{ display:"flex", flexWrap:"wrap", alignItems:"center", gap:6 }}>
+                  {cn.isA.map((t,i)=>(
+                    <span key={t} style={{ display:"flex", alignItems:"center", gap:6 }}>
+                      {i>0 && <span style={{ color:C.textDim, fontSize:12 }}>›</span>}
+                      <Tag label={t} color={C.gold} onPin={onPin} pinned={pinned?.has(t)}/>
+                    </span>
+                  ))}
+                </div>
+                <div style={{ fontSize:10, color:C.textDim, fontFamily:"monospace",
+                  marginTop:10, fontStyle:"italic" }}>
+                  Genus chain — the hierarchy of categories this concept belongs to.
+                </div>
+              </div>
+            );
+            if (tab==="kinds" && cn?.hyponyms?.length > 0) return (
+              <div>
+                {desc("Specific kinds of ", concept, ":", C.blue)}
+                <TagRow items={cn.hyponyms} c={C.blue}
+                  note="Hyponyms — concrete instances, the perceptual units of this concept."/>
+              </div>
+            );
+            if (tab==="ant" && cn?.antonyms?.length > 0) return (
+              <div>
+                {desc("Opposite of ", concept, ":", C.red)}
+                <TagRow items={cn.antonyms} c={C.red}
+                  note="Antonyms — concepts defined by contrast. Useful for identifying the differentia by negation."/>
+              </div>
+            );
+            if (tab==="syn" && cn?.synonyms?.length > 0) return (
+              <div>
+                {desc("Similar or equivalent to ", concept, ":", C.green)}
+                <TagRow items={cn.synonyms} c={C.green}
+                  note="Synonyms and near-synonyms — concepts that share the same or similar definition."/>
+              </div>
+            );
+            if (tab==="props" && cn?.properties?.length > 0) return (
+              <div>
+                {desc("Properties of ", concept, ":", C.purple)}
+                <TagRow items={cn.properties} c={C.purple}
+                  note="Distinguishing characteristics — differentia candidates."/>
+              </div>
+            );
+            if (tab==="uses" && cn?.usedFor?.length > 0) return (
+              <div>
+                {desc("Concepts strongly associated with ", concept, ":", C.gold)}
+                <TagRow items={cn.usedFor} c={C.gold}/>
+              </div>
+            );
+            if (tab==="comprises" && cn?.comprises?.length > 0) return (
+              <div>
+                {desc(concept, " comprises (contains):", "", "#4db8d4")}
+                <TagRow items={cn.comprises} c="#4db8d4"
+                  note="Holonyms — things this concept is made up of or contains."/>
+              </div>
+            );
+            if (tab==="partof" && cn?.partOf?.length > 0) return (
+              <div>
+                {desc(concept, " is a part of:", "", "#d47a4d")}
+                <TagRow items={cn.partOf} c="#d47a4d"
+                  note="Meronyms — larger wholes that this concept belongs to."/>
+              </div>
+            );
+            if (tab==="wiki" && wiki) return (
+              <div>
+                <div style={{ fontSize:13, color:C.textMid, lineHeight:1.8,
+                  borderLeft:`2px solid ${C.textDim}40`, paddingLeft:12, fontStyle:"italic" }}>
+                  {wiki.extract}{wiki.extract.length>=599?"…":""}
+                </div>
+                {wiki.url && (
+                  <a href={wiki.url} target="_blank" rel="noreferrer"
+                    style={{ display:"inline-block", marginTop:10, fontSize:11,
+                      fontFamily:"monospace", color:C.textDim, textDecoration:"none" }}>
+                    → full article on Wikipedia ↗
+                  </a>
+                )}
+              </div>
+            );
+            return null;
+          })()}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─── Sense picker ─────────────────────────────────────────────────────────────
+function SensePicker({ data, depth, chosenSenseIdx, onChoose }) {
+  const color  = nc(depth);
+  const indent = depth * INDENT + (depth > 0 ? 16 : 0) + 22;
+  return (
+    <div style={{ marginLeft:indent, marginTop:2, marginBottom:6, maxWidth:660,
+      animation:"slideDown 0.15s ease" }}>
+
+      <div style={{ fontSize:11, fontFamily:"monospace", color:C.textDim,
+        textTransform:"uppercase", letterSpacing:1.5, marginBottom:8,
+        display:"flex", alignItems:"center", gap:8 }}>
+        <span style={{ color }}>"{data.concept}"</span>
+        {data.phonetic && <span>{data.phonetic}</span>}
+        {chosenSenseIdx === null
+          ? <span>— choose a definition to branch from:</span>
+          : <span onClick={e=>{e.stopPropagation();onChoose(null);}}
+              style={{ color:C.gold, cursor:"pointer", textDecoration:"underline",
+                textDecorationStyle:"dotted" }}>change sense</span>}
+      </div>
+
+      {(chosenSenseIdx !== null ? [data.senses[chosenSenseIdx]] : data.senses).map((sense,i) => {
         const realIdx = chosenSenseIdx !== null ? chosenSenseIdx : i;
         const isChosen = chosenSenseIdx === realIdx;
-        const { genus, differentia } = sense;
         return (
-          <div
-            key={i}
-            onClick={() => onChoose(isChosen ? null : realIdx)}
+          <div key={i} onClick={()=>onChoose(isChosen ? null : realIdx)}
             style={{
               background: isChosen ? `${color}18` : C.panelAlt,
-              border: `1px solid ${isChosen ? color : C.border}`,
-              borderLeft: `3px solid ${isChosen ? color : C.border}`,
-              borderRadius: "0 8px 8px 0",
-              padding: "12px 16px",
-              marginBottom: 6,
-              cursor: "pointer",
-              transition: "all 0.15s",
-              position: "relative",
+              border:`1px solid ${isChosen ? color : C.border}`,
+              borderLeft:`3px solid ${isChosen ? color : C.border}`,
+              borderRadius:"0 8px 8px 0",
+              padding:"12px 16px", marginBottom:6,
+              cursor:"pointer", transition:"all 0.15s", position:"relative",
             }}
-            onMouseEnter={e => { if (!isChosen) e.currentTarget.style.borderColor = `${color}70`; }}
-            onMouseLeave={e => { if (!isChosen) e.currentTarget.style.borderColor = C.border; }}
+            onMouseEnter={e=>{if(!isChosen)e.currentTarget.style.borderColor=`${color}70`;}}
+            onMouseLeave={e=>{if(!isChosen)e.currentTarget.style.borderColor=C.border;}}
           >
-            {/* chosen badge */}
             {isChosen && (
-              <div style={{
-                position:"absolute", top:10, right:12,
-                fontSize:9, fontFamily:"monospace",
-                background: color, color:"#060610",
-                padding:"2px 7px", borderRadius:3,
-                fontWeight:700, letterSpacing:1,
-              }}>BRANCHING FROM THIS</div>
+              <div style={{ position:"absolute", top:10, right:12, fontSize:9,
+                fontFamily:"monospace", background:color, color:"#060610",
+                padding:"2px 7px", borderRadius:3, fontWeight:700, letterSpacing:1 }}>
+                BRANCHING FROM THIS
+              </div>
             )}
-
-            {/* pos badge + definition */}
             <div style={{ display:"flex", alignItems:"baseline", gap:8, marginBottom:8 }}>
-              <span style={{
-                fontSize:10, fontFamily:"monospace",
-                padding:"2px 7px",
+              <span style={{ fontSize:10, fontFamily:"monospace", padding:"2px 7px",
                 background:`${color}20`, border:`1px solid ${color}40`,
-                borderRadius:3, color, flexShrink:0,
-              }}>{sense.pos}</span>
-              <span style={{ fontSize:14, color: C.text, lineHeight:1.5, fontStyle:"italic" }}>
+                borderRadius:3, color, flexShrink:0 }}>{sense.pos}</span>
+              <span style={{ fontSize:14, color:C.text, lineHeight:1.5, fontStyle:"italic" }}>
                 "{sense.text}"
               </span>
             </div>
-
-            {/* G/D */}
-            <div style={{ display:"grid", gridTemplateColumns:"90px 1fr", gap:"5px 10px", marginBottom: sense.example ? 8 : 0 }}>
-              {[["Genus", genus], ["Differentia", differentia]].map(([k,v]) => (
-                <>
-                  <span key={k+"k"} style={{ fontSize:9, fontFamily:"monospace", fontWeight:700, textTransform:"uppercase", letterSpacing:1.5, color:C.goldDim, paddingTop:2 }}>{k}</span>
-                  <span key={k+"v"} style={{ fontSize:13, color:C.textMid, fontStyle:"italic" }}>{v}</span>
-                </>
+            <div style={{ display:"grid", gridTemplateColumns:"90px 1fr", gap:"5px 10px",
+              marginBottom: sense.example ? 8 : 0 }}>
+              {[["Genus",sense.genus],["Differentia",sense.differentia]].map(([k,v])=>(
+                <React.Fragment key={k}>
+                  <span style={{ fontSize:9, fontFamily:"monospace", fontWeight:700,
+                    textTransform:"uppercase", letterSpacing:1.5, color:C.goldDim, paddingTop:2 }}>{k}</span>
+                  <span style={{ fontSize:13, color:C.textMid, fontStyle:"italic" }}>{v}</span>
+                </React.Fragment>
               ))}
             </div>
-
-            {/* example */}
             {sense.example && (
-              <div style={{ fontSize:12, color:C.textDim, fontStyle:"italic", marginTop:6, borderTop:`1px solid ${C.border}`, paddingTop:6 }}>
+              <div style={{ fontSize:12, color:C.textDim, fontStyle:"italic",
+                borderTop:`1px solid ${C.border}`, paddingTop:6, marginTop:4 }}>
                 e.g. "{sense.example}"
               </div>
             )}
-
-            {/* key terms preview */}
-            {sense.keyTerms?.length > 0 && (
+            {!isChosen && sense.keyTerms?.length > 0 && (
               <div style={{ marginTop:8, display:"flex", flexWrap:"wrap", gap:5, alignItems:"center" }}>
-                <span style={{ fontSize:9, fontFamily:"monospace", color:C.textDim, textTransform:"uppercase", letterSpacing:1 }}>
-                  would branch into →
-                </span>
-                {sense.keyTerms.map(t => (
-                  <span key={t} style={{
-                    fontSize:11, padding:"2px 8px",
+                <span style={{ fontSize:9, fontFamily:"monospace", color:C.textDim,
+                  textTransform:"uppercase", letterSpacing:1 }}>branches into →</span>
+                {sense.keyTerms.map(t=>(
+                  <span key={t} style={{ fontSize:11, padding:"2px 8px",
                     background:`${color}14`, border:`1px solid ${color}35`,
-                    borderRadius:10, color, fontFamily:"'Georgia',serif",
-                  }}>{t}</span>
+                    borderRadius:10, color, fontFamily:"'Georgia',serif" }}>{t}</span>
                 ))}
               </div>
             )}
@@ -265,10 +491,16 @@ function SensePicker({ data, depth, chosenSenseIdx, onChoose }) {
 }
 
 // ─── Tree row ─────────────────────────────────────────────────────────────────
-function TreeRow({ concept, depth, nodeMap, loadingSet, expandedSet, chosenSenses, onExpand, onChooseSense, isLast }) {
-  const [hovered, setHovered] = useState(false);
+function TreeRow({ concept, depth, nodeMap, loadingSet, expandedSet, chosenSenses, onExpand, onChooseSense, isLast, nodeRefs }) {
+  const [hovered,     setHovered]     = useState(false);
+  const [pinnedTerms, setPinnedTerms] = useState(new Set());
+  const handlePin = (term) => {
+    setPinnedTerms(p => new Set([...p, term]));
+    onExpand(term, depth + 1);
+    // scroll is handled by onExpand -> handleExpand in App
+  };
   const nodeKey     = `${concept}@${depth}`;
-  const data        = nodeMap[concept];          // { concept, phonetic, senses }
+  const data        = nodeMap[concept];
   const loading     = loadingSet.has(concept);
   const expanded    = expandedSet.has(nodeKey);
   const color       = nc(depth);
@@ -276,115 +508,107 @@ function TreeRow({ concept, depth, nodeMap, loadingSet, expandedSet, chosenSense
   const chosenIdx   = chosenSenses[nodeKey] ?? null;
   const chosenSense = (chosenIdx !== null && data) ? data.senses[chosenIdx] : null;
   const children    = (chosenSense && expanded) ? chosenSense.keyTerms : [];
+  const indent      = depth * INDENT + (depth > 0 ? 16 : 0) + 22;
+  const nodeKey2    = `${concept}@${depth}`;
+  const rowRef      = useCallback(el => {
+    if (nodeRefs && el) nodeRefs.current[nodeKey2] = el;
+  }, [nodeKey2, nodeRefs]);
 
   return (
-    <div>
-      {/* ── row ── */}
-      <div
-        style={{ display:"flex", alignItems:"center", minHeight:34, position:"relative", cursor:"pointer" }}
-        onMouseEnter={() => setHovered(true)}
-        onMouseLeave={() => setHovered(false)}
-      >
-        {/* guide lines */}
-        {Array.from({ length: depth }).map((_, i) => (
-          <div key={i} style={{
-            position:"absolute", left:i*INDENT+13,
-            top:0, bottom:0, width:1,
-            background:`${C.nodeColors[i % C.nodeColors.length]}20`,
-          }}/>
-        ))}
+    <div ref={rowRef} style={{ scrollMarginTop: 140 }}>
+      {/* Row */}
+      <div style={{ display:"flex", alignItems:"center", minHeight:34,
+        position:"relative", cursor:"pointer" }}
+        onMouseEnter={()=>setHovered(true)} onMouseLeave={()=>setHovered(false)}>
 
-        {/* elbow */}
+        {Array.from({length:depth}).map((_,i)=>(
+          <div key={i} style={{ position:"absolute", left:i*INDENT+13, top:0, bottom:0,
+            width:1, background:`${C.nodeColors[i%C.nodeColors.length]}20` }}/>
+        ))}
         {depth > 0 && <>
-          <div style={{ position:"absolute", left:(depth-1)*INDENT+13, top:0, height:"50%", width:16, borderBottom:`1px solid ${color}40` }}/>
-          {!isLast && <div style={{ position:"absolute", left:(depth-1)*INDENT+13, top:"50%", bottom:"-100%", width:1, background:`${color}40` }}/>}
+          <div style={{ position:"absolute", left:(depth-1)*INDENT+13, top:0,
+            height:"50%", width:16, borderBottom:`1px solid ${color}40` }}/>
+          {!isLast && <div style={{ position:"absolute", left:(depth-1)*INDENT+13,
+            top:"50%", bottom:"-100%", width:1, background:`${color}40` }}/>}
         </>}
 
-        {/* content */}
-        <div
-          onClick={() => onExpand(concept, depth)}
+        <div onClick={()=>onExpand(concept,depth)}
           style={{
             display:"flex", alignItems:"center", gap:10,
-            marginLeft: depth * INDENT + (depth > 0 ? 16 : 0),
-            padding:"5px 14px 5px 8px",
-            borderRadius:6,
+            marginLeft: depth*INDENT + (depth>0?16:0),
+            padding:"5px 14px 5px 8px", borderRadius:6,
             background: hovered ? `${color}12` : "transparent",
             border:`1px solid ${hovered ? `${color}35` : "transparent"}`,
-            transition:"all 0.12s",
-            userSelect:"none", position:"relative",
-          }}
-        >
-          {/* chevron */}
-          <span style={{ fontSize:10, width:12, textAlign:"center", color:`${color}90`, flexShrink:0 }}>
-            {loading ? "·" : !isDefined ? "▷" : expanded ? "▾" : "▸"}
-          </span>
-
-          {/* icon */}
-          <span style={{ fontSize:14, flexShrink:0 }}>
-            {!isDefined ? "○" : chosenSense ? (expanded && children.length > 0 ? (expanded ? "📂" : "📁") : "📄") : "❓"}
-          </span>
-
-          {/* name */}
-          <span style={{
-            fontSize: depth === 0 ? 18 : depth === 1 ? 16 : 15,
-            fontWeight: depth === 0 ? 700 : isDefined ? 600 : 400,
-            color: isDefined ? color : loading ? `${color}55` : C.textDim,
-            fontFamily:"'Georgia','Times New Roman',serif",
-            letterSpacing: depth === 0 ? "-0.01em" : "0",
-            lineHeight:1,
+            transition:"all 0.12s", userSelect:"none",
           }}>
-            {loading ? <><Dots color={color}/>{concept}</> : concept}
+          <span style={{ fontSize:10, width:12, textAlign:"center", color:`${color}90`, flexShrink:0 }}>
+            {loading?"·":!isDefined?"▷":expanded?"▾":"▸"}
           </span>
-
-          {/* chosen sense summary (short) */}
+          <span style={{ fontSize:14, flexShrink:0 }}>
+            {!isDefined?"○":chosenSense?(expanded&&children.length>0?"📂":"📄"):"❓"}
+          </span>
+          <span style={{
+            fontSize: depth===0?18:depth===1?16:15,
+            fontWeight: depth===0?700:isDefined?600:400,
+            color: isDefined?color:loading?`${color}55`:C.textDim,
+            fontFamily:"'Georgia','Times New Roman',serif",
+            letterSpacing: depth===0?"-0.01em":"0", lineHeight:1,
+          }}>
+            {loading?<><Dots color={color}/>{concept}</>:concept}
+          </span>
           {chosenSense && (
-            <span style={{ fontSize:11, color:C.textDim, fontStyle:"italic", maxWidth:260, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>
-              ({chosenSense.pos}) {chosenSense.text.slice(0,60)}{chosenSense.text.length > 60 ? "…" : ""}
+            <span style={{ fontSize:11, color:C.textDim, fontStyle:"italic",
+              maxWidth:260, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>
+              ({chosenSense.pos}) {chosenSense.text.slice(0,55)}{chosenSense.text.length>55?"…":""}
             </span>
           )}
-
-          {/* depth badge */}
-          <span style={{
-            fontSize:10, fontFamily:"monospace", padding:"2px 7px",
+          <span style={{ fontSize:10, fontFamily:"monospace", padding:"2px 7px",
             background:`${color}18`, border:`1px solid ${color}30`,
-            borderRadius:4, color, letterSpacing:0.5, flexShrink:0,
-          }}>{lbl(depth)}</span>
-
-          {!isDefined && !loading && (
+            borderRadius:4, color, letterSpacing:0.5, flexShrink:0 }}>{lbl(depth)}</span>
+          {!isDefined&&!loading&&(
             <span style={{ fontSize:11, color:C.textDim, fontStyle:"italic" }}>click to look up</span>
           )}
-          {isDefined && chosenIdx === null && !loading && (
+          {isDefined&&chosenIdx===null&&!loading&&(
             <span style={{ fontSize:11, color:C.gold, fontStyle:"italic" }}>↓ pick a sense below</span>
           )}
         </div>
       </div>
 
-      {/* ── sense picker (always visible when expanded and no sense chosen, or sense chosen) ── */}
+      {/* Expanded content */}
       {isDefined && expanded && (
-        <SensePicker
-          data={data}
-          depth={depth}
-          chosenSenseIdx={chosenIdx}
-          onChoose={(i) => onChooseSense(concept, depth, i)}
-        />
+        <>
+          {/* Semantic analysis panel — always shown first */}
+          <EnrichmentPanel concept={concept} depth={depth} indent={indent} onPin={handlePin} pinned={pinnedTerms}/>
+          {/* Sense picker */}
+          <SensePicker data={data} depth={depth} chosenSenseIdx={chosenIdx}
+            onChoose={i=>onChooseSense(concept,depth,i)}/>
+        </>
       )}
 
-      {/* ── children (only when a sense is chosen) ── */}
+      {/* Children — from definition keyTerms */}
       {expanded && chosenSense && children.length > 0 && (
         <div>
-          {children.map((child, i) => (
-            <TreeRow
-              key={`${child}-d${depth+1}-${i}`}
-              concept={child}
-              depth={depth + 1}
-              nodeMap={nodeMap}
-              loadingSet={loadingSet}
-              expandedSet={expandedSet}
-              chosenSenses={chosenSenses}
-              onExpand={onExpand}
-              onChooseSense={onChooseSense}
-              isLast={i === children.length - 1}
-            />
+          {children.map((child,i)=>(
+            <TreeRow key={`${child}-d${depth+1}-${i}`}
+              concept={child} depth={depth+1}
+              nodeMap={nodeMap} loadingSet={loadingSet}
+              expandedSet={expandedSet} chosenSenses={chosenSenses}
+              onExpand={onExpand} onChooseSense={onChooseSense}
+              isLast={i===children.length-1 && pinnedTerms.size===0} nodeRefs={nodeRefs}/>
+          ))}
+        </div>
+      )}
+
+      {/* Pinned children — added from semantic analysis tags */}
+      {expanded && pinnedTerms.size > 0 && (
+        <div>
+          {[...pinnedTerms].map((term, i) => (
+            <TreeRow key={`pinned-${term}-d${depth+1}`}
+              concept={term} depth={depth+1}
+              nodeMap={nodeMap} loadingSet={loadingSet}
+              expandedSet={expandedSet} chosenSenses={chosenSenses}
+              onExpand={onExpand} onChooseSense={onChooseSense}
+              isLast={i===[...pinnedTerms].length-1} nodeRefs={nodeRefs}/>
           ))}
         </div>
       )}
@@ -396,42 +620,70 @@ function TreeRow({ concept, depth, nodeMap, loadingSet, expandedSet, chosenSense
 export default function App() {
   const [rootConcept, setRootConcept] = useState("");
   const [input,       setInput]       = useState("");
-  const [nodeMap,     setNodeMap]     = useState({});       // concept → {concept, phonetic, senses[]}
+  const [nodeMap,     setNodeMap]     = useState({});
   const [loadingSet,  setLoadingSet]  = useState(new Set());
-  const [expandedSet, setExpandedSet] = useState(new Set()); // nodeKey = concept@depth
-  const [chosenSenses,setChosenSenses]= useState({});       // nodeKey → senseIdx
+  const [expandedSet, setExpandedSet] = useState(new Set());
+  const [chosenSenses,setChosenSenses]= useState({});
   const [errors,      setErrors]      = useState({});
   const [searching,   setSearching]   = useState(false);
+  const nodeRefs = useRef({});
 
-  const addLoading    = (c) => setLoadingSet(p => new Set([...p, c]));
-  const removeLoading = (c) => setLoadingSet(p => { const n = new Set(p); n.delete(c); return n; });
+  const addLoading    = c => setLoadingSet(p=>new Set([...p,c]));
+  const removeLoading = c => setLoadingSet(p=>{const n=new Set(p);n.delete(c);return n;});
+
+  // When opening a node at depth D, collapse all siblings at depth D
+  // (any expanded key at depth D that isn't this node) and everything deeper.
+  const focusPath = (expandedSet, nodeKey, depth) => {
+    const kept = new Set();
+    for (const k of expandedSet) {
+      const d = parseInt(k.split("@")[1], 10);
+      if (d < depth) kept.add(k);       // keep all ancestors
+      // drop everything at depth >= D (siblings + their subtrees)
+    }
+    kept.add(nodeKey); // add the newly opened node
+    return kept;
+  };
 
   const handleExpand = useCallback(async (concept, depth) => {
     const nodeKey = `${concept}@${depth}`;
-    // Already loaded — just toggle expand
     if (nodeMap[concept]) {
-      setExpandedSet(p => { const n = new Set(p); n.has(nodeKey) ? n.delete(nodeKey) : n.add(nodeKey); return n; });
+      // If already open, just toggle it (collapsing clears deeper too)
+      if (expandedSet.has(nodeKey)) {
+        setExpandedSet(p => {
+          const n = new Set();
+          for (const k of p) {
+            const d = parseInt(k.split("@")[1], 10);
+            if (d < depth) n.add(k);
+          }
+          return n;
+        });
+      } else {
+        setExpandedSet(p => focusPath(p, nodeKey, depth));
+        setTimeout(() => nodeRefs.current[nodeKey]?.scrollIntoView({ behavior:"smooth", block:"start" }), 30);
+      }
       return;
     }
     if (loadingSet.has(concept)) return;
     addLoading(concept);
-    setErrors(p => { const n={...p}; delete n[concept]; return n; });
+    setErrors(p=>{const n={...p};delete n[concept];return n;});
     try {
       const data = await fetchAllSenses(concept);
-      setNodeMap(p => ({ ...p, [concept]: data }));
-      setExpandedSet(p => new Set([...p, nodeKey]));
+      setNodeMap(p=>({...p,[concept]:data}));
+      setExpandedSet(p => focusPath(p, nodeKey, depth));
+      setTimeout(() => nodeRefs.current[nodeKey]?.scrollIntoView({ behavior:"smooth", block:"start" }), 60);
     } catch(e) {
-      setErrors(p => ({ ...p, [concept]: e.message }));
+      setErrors(p=>({...p,[concept]:e.message}));
     } finally { removeLoading(concept); }
-  }, [nodeMap, loadingSet]);
+  }, [nodeMap, loadingSet, expandedSet]);
 
   const handleChooseSense = useCallback((concept, depth, senseIdx) => {
     const nodeKey = `${concept}@${depth}`;
     if (senseIdx === null) {
-      setChosenSenses(p => { const n = {...p}; delete n[nodeKey]; return n; });
+      setChosenSenses(p=>{const n={...p};delete n[nodeKey];return n;});
     } else {
-      setChosenSenses(p => ({ ...p, [nodeKey]: senseIdx }));
-      setExpandedSet(p => new Set([...p, nodeKey]));
+      setChosenSenses(p=>({...p,[nodeKey]:senseIdx}));
+      setExpandedSet(p => focusPath(p, nodeKey, depth));
+      setTimeout(() => nodeRefs.current[nodeKey]?.scrollIntoView({ behavior:"smooth", block:"start" }), 30);
     }
   }, []);
 
@@ -444,11 +696,11 @@ export default function App() {
     addLoading(term);
     try {
       const data = await fetchAllSenses(term);
-      setNodeMap({ [term]: data });
+      setNodeMap({[term]:data});
       setExpandedSet(new Set([`${term}@0`]));
       removeLoading(term);
     } catch(e) {
-      setErrors({ [term]: e.message });
+      setErrors({[term]:e.message});
       removeLoading(term);
     } finally { setSearching(false); }
   };
@@ -458,90 +710,87 @@ export default function App() {
   return (
     <div style={{ minHeight:"100vh", width:"100%", background:C.bg, color:C.text, fontFamily:"'Georgia',serif" }}>
       <style>{`
-        html,body,#root { margin:0; padding:0; width:100%; min-height:100vh; background:${C.bg}; }
-        * { box-sizing:border-box; }
-        @keyframes pulse { 0%,100%{opacity:0.2;transform:scale(0.7)} 50%{opacity:1;transform:scale(1.2)} }
-        @keyframes slideDown { from{opacity:0;transform:translateY(-6px)} to{opacity:1;transform:translateY(0)} }
-        input:focus { outline:none; }
-        ::-webkit-scrollbar { width:6px; }
-        ::-webkit-scrollbar-thumb { background:${C.goldDim}; border-radius:3px; }
+        html,body,#root{margin:0;padding:0;width:100%;min-height:100vh;background:${C.bg};}
+        *{box-sizing:border-box;}
+        @keyframes pulse{0%,100%{opacity:0.2;transform:scale(0.7)}50%{opacity:1;transform:scale(1.2)}}
+        @keyframes slideDown{from{opacity:0;transform:translateY(-6px)}to{opacity:1;transform:translateY(0)}}
+        input:focus{outline:none;}
+        ::-webkit-scrollbar{width:6px;}
+        ::-webkit-scrollbar-thumb{background:${C.goldDim};border-radius:3px;}
+        button:focus{outline:none;}
       `}</style>
 
       {/* Header */}
-      <div style={{
-        borderBottom:`1px solid ${C.border}`,
-        padding:"22px 40px 18px",
-        background:"linear-gradient(to bottom, #0f0f20, #0c0c14)",
-        position:"sticky", top:0, zIndex:50,
-      }}>
+      <div style={{ borderBottom:`1px solid ${C.border}`, padding:"22px 40px 18px",
+        background:"linear-gradient(to bottom,#0f0f20,#0c0c14)",
+        position:"sticky", top:0, zIndex:50 }}>
         <div style={{ maxWidth:820, margin:"0 auto" }}>
-          <div style={{ fontSize:10, fontFamily:"monospace", letterSpacing:3, color:C.goldDim, textTransform:"uppercase", marginBottom:4 }}>
-            Conceptual Hierarchy · Genus & Differentia
+          <div style={{ fontSize:10, fontFamily:"monospace", letterSpacing:3,
+            color:C.goldDim, textTransform:"uppercase", marginBottom:4 }}>
+            Conceptual Hierarchy · Genus &amp; Differentia
           </div>
           <h1 style={{ fontSize:26, fontWeight:700, color:C.gold, margin:"0 0 4px", letterSpacing:"-0.02em" }}>
             Definition Reduction Explorer
           </h1>
-          <p style={{ color:C.textMid, fontSize:13, margin:"0 0 16px", lineHeight:1.5 }}>
-            Click any node to expand it. Pick which sense you want to branch from — the tree follows your chosen definition.
+          <p style={{ color:C.textMid, fontSize:13, margin:"0 0 14px", lineHeight:1.5 }}>
+            Search a concept → expand any node → see its genus chain, specific kinds, properties, and Wikipedia grounding.
           </p>
           <div style={{ display:"flex", gap:10 }}>
-            <input
-              value={input}
-              onChange={e => setInput(e.target.value)}
-              onKeyDown={e => e.key === "Enter" && handleSearch()}
+            <input value={input} onChange={e=>setInput(e.target.value)}
+              onKeyDown={e=>e.key==="Enter"&&handleSearch()}
               placeholder="Enter any concept — justice, knowledge, reason…"
-              style={{
-                flex:1, background:"#0e0e1c", border:`1px solid ${C.border}`,
-                borderRadius:7, padding:"11px 16px",
-                color:C.text, fontSize:15, fontFamily:"'Georgia',serif",
-                transition:"border-color 0.2s",
-              }}
-              onFocus={e => e.target.style.borderColor = C.gold}
-              onBlur={e => e.target.style.borderColor = C.border}
+              style={{ flex:1, background:"#0e0e1c", border:`1px solid ${C.border}`,
+                borderRadius:7, padding:"11px 16px", color:C.text, fontSize:15,
+                fontFamily:"'Georgia',serif", transition:"border-color 0.2s" }}
+              onFocus={e=>e.target.style.borderColor=C.gold}
+              onBlur={e=>e.target.style.borderColor=C.border}
             />
-            <button
-              onClick={handleSearch}
-              disabled={searching || !input.trim()}
-              style={{
-                background: searching ? C.goldDim : C.gold,
-                color:"#08080e", border:"none", borderRadius:7,
-                padding:"11px 22px", fontFamily:"monospace",
-                fontSize:11, fontWeight:700, letterSpacing:2,
-                textTransform:"uppercase", cursor: searching ? "wait" : "pointer",
-                whiteSpace:"nowrap",
-              }}
-            >{searching ? "Looking up…" : "Define →"}</button>
+            <button onClick={handleSearch} disabled={searching||!input.trim()}
+              style={{ background:searching?C.goldDim:C.gold, color:"#08080e", border:"none",
+                borderRadius:7, padding:"11px 22px", fontFamily:"monospace", fontSize:11,
+                fontWeight:700, letterSpacing:2, textTransform:"uppercase",
+                cursor:searching?"wait":"pointer", whiteSpace:"nowrap" }}>
+              {searching?"Looking up…":"Define →"}
+            </button>
           </div>
         </div>
       </div>
 
-      {/* Errors */}
-      {Object.entries(errors).filter(([k]) => k === rootConcept).map(([k, msg]) => (
-        <div key={k} style={{ maxWidth:700, margin:"16px auto", padding:"10px 16px", background:"#1e0c0c", border:"1px solid #5a2020", borderRadius:6, color:"#e07070", fontSize:13 }}>
-          ⚠ {msg}
-        </div>
+      {Object.entries(errors).filter(([k])=>k===rootConcept).map(([k,msg])=>(
+        <div key={k} style={{ maxWidth:700, margin:"16px auto", padding:"10px 16px",
+          background:"#1e0c0c", border:"1px solid #5a2020", borderRadius:6,
+          color:"#e07070", fontSize:13 }}>⚠ {msg}</div>
       ))}
 
       {/* Empty state */}
       {!rootConcept && (
-        <div style={{ display:"flex", flexDirection:"column", alignItems:"center", justifyContent:"center", minHeight:"60vh", gap:20 }}>
+        <div style={{ display:"flex", flexDirection:"column", alignItems:"center",
+          justifyContent:"center", minHeight:"60vh", gap:20 }}>
           <div style={{ fontSize:48, opacity:0.12 }}>⬡</div>
-          <div style={{ textAlign:"center", maxWidth:440 }}>
-            <div style={{ fontSize:18, color:C.gold, fontWeight:700, marginBottom:8 }}>Start with any concept</div>
-            <div style={{ color:C.textMid, fontSize:14, lineHeight:1.8 }}>
-              Each node shows all dictionary senses. Each node shows all dictionary senses. Pick the meaning you want — the tree builds the conceptual hierarchy from that definition.
+          <div style={{ textAlign:"center", maxWidth:540 }}>
+            <div style={{ fontSize:18, color:C.gold, fontWeight:700, marginBottom:10 }}>
+              Start with any concept
+            </div>
+            <div style={{ color:C.textMid, fontSize:13, lineHeight:2 }}>
+              <span style={{ color:C.text }}>Wiktionary</span> · genus &amp; differentia · branching tree
+              <br/>
+              <span style={{ color:C.gold }}>+</span>{" "}
+              <span style={{ color:C.text }}>ConceptNet</span> · genus chain · specific kinds · properties · used for
+              <br/>
+              <span style={{ color:C.gold }}>+</span>{" "}
+              <span style={{ color:C.text }}>Wikipedia</span> · real-world context
+              <br/>
+              <span style={{ color:C.textDim, fontSize:12 }}>No API key needed for any of it.</span>
             </div>
           </div>
-          <div style={{ display:"flex", gap:8, flexWrap:"wrap", justifyContent:"center", marginTop:4 }}>
-            {suggestions.map(s => (
-              <button key={s} onClick={() => setInput(s)} style={{
-                background:"transparent", border:`1px solid ${C.goldDim}`,
-                borderRadius:16, padding:"6px 16px",
-                color:C.goldDim, fontSize:13, cursor:"pointer",
-                fontFamily:"'Georgia',serif", transition:"all 0.15s",
-              }}
-                onMouseEnter={e => { e.currentTarget.style.borderColor=C.gold; e.currentTarget.style.color=C.gold; }}
-                onMouseLeave={e => { e.currentTarget.style.borderColor=C.goldDim; e.currentTarget.style.color=C.goldDim; }}
+          <div style={{ display:"flex", gap:8, flexWrap:"wrap", justifyContent:"center" }}>
+            {suggestions.map(s=>(
+              <button key={s} onClick={()=>setInput(s)}
+                style={{ background:"transparent", border:`1px solid ${C.goldDim}`,
+                  borderRadius:16, padding:"6px 16px", color:C.goldDim, fontSize:13,
+                  cursor:"pointer", fontFamily:"'Georgia',serif", transition:"all 0.15s" }}
+                onMouseEnter={e=>{e.currentTarget.style.borderColor=C.gold;e.currentTarget.style.color=C.gold;}}
+                onMouseLeave={e=>{e.currentTarget.style.borderColor=C.goldDim;e.currentTarget.style.color=C.goldDim;}}
               >{s}</button>
             ))}
           </div>
@@ -550,12 +799,13 @@ export default function App() {
 
       {/* Tree */}
       {rootConcept && (
-        <div style={{ padding:"32px 40px 80px", maxWidth:920, margin:"0 auto" }}>
-          <div style={{ background:C.panel, border:`1px solid ${C.border}`, borderRadius:10, padding:"18px 16px 20px" }}>
-            {/* titlebar */}
-            <div style={{ display:"flex", alignItems:"center", gap:10, marginBottom:18, paddingBottom:14, borderBottom:`1px solid ${C.border}` }}>
+        <div style={{ padding:"32px 40px 80px", maxWidth:960, margin:"0 auto" }}>
+          <div style={{ background:C.panel, border:`1px solid ${C.border}`,
+            borderRadius:10, padding:"18px 16px 20px" }}>
+            <div style={{ display:"flex", alignItems:"center", gap:10, marginBottom:18,
+              paddingBottom:14, borderBottom:`1px solid ${C.border}` }}>
               <div style={{ display:"flex", gap:6 }}>
-                {["#e05555","#e0a020","#50a050"].map(col => (
+                {["#e05555","#e0a020","#50a050"].map(col=>(
                   <div key={col} style={{ width:11, height:11, borderRadius:"50%", background:col, opacity:0.75 }}/>
                 ))}
               </div>
@@ -563,32 +813,27 @@ export default function App() {
                 CONCEPTUAL HIERARCHY · {rootConcept.toUpperCase()}
               </span>
             </div>
-
-            <TreeRow
-              concept={rootConcept}
-              depth={0}
-              nodeMap={nodeMap}
-              loadingSet={loadingSet}
-              expandedSet={expandedSet}
-              chosenSenses={chosenSenses}
-              onExpand={handleExpand}
-              onChooseSense={handleChooseSense}
-              isLast={true}
-            />
-
-            {Object.entries(errors).filter(([k]) => k !== rootConcept).map(([k,msg]) => (
-              <div key={k} style={{ marginTop:6, fontSize:11, color:"#c06060", fontFamily:"monospace", paddingLeft:32 }}>⚠ {k}: {msg}</div>
+            <TreeRow concept={rootConcept} depth={0}
+              nodeMap={nodeMap} loadingSet={loadingSet}
+              expandedSet={expandedSet} chosenSenses={chosenSenses}
+              onExpand={handleExpand} onChooseSense={handleChooseSense}
+              isLast={true} nodeRefs={nodeRefs}/>
+            {Object.entries(errors).filter(([k])=>k!==rootConcept).map(([k,msg])=>(
+              <div key={k} style={{ marginTop:6, fontSize:11, color:"#c06060",
+                fontFamily:"monospace", paddingLeft:32 }}>⚠ {k}: {msg}</div>
             ))}
           </div>
 
-          <div style={{ display:"flex", gap:16, marginTop:14, flexWrap:"wrap", alignItems:"center" }}>
-            {[0,1,2,3,4,5].map(d => (
-              <div key={d} style={{ display:"flex", alignItems:"center", gap:6 }}>
+          <div style={{ display:"flex", gap:14, marginTop:14, flexWrap:"wrap", alignItems:"center" }}>
+            {[0,1,2,3,4,5].map(d=>(
+              <div key={d} style={{ display:"flex", alignItems:"center", gap:5 }}>
                 <div style={{ width:8, height:8, borderRadius:2, background:nc(d) }}/>
                 <span style={{ fontSize:11, fontFamily:"monospace", color:nc(d) }}>{lbl(d)}</span>
               </div>
             ))}
-            <span style={{ fontSize:11, fontFamily:"monospace", color:C.textDim, marginLeft:"auto" }}>source: dictionaryapi.dev (Wiktionary)</span>
+            <span style={{ fontSize:10, fontFamily:"monospace", color:C.textDim, marginLeft:"auto" }}>
+              Wiktionary · ConceptNet · Wikipedia
+            </span>
           </div>
         </div>
       )}
