@@ -2,7 +2,7 @@
 
 An interactive dictionary tree that lets you drill into the meaning of any concept by recursively expanding its definitions — revealing the conceptual hierarchy beneath every word.
 
-![screenshot placeholder](https://placehold.co/800x400/0c0c14/d4a84c?text=Definition+Reduction+Explorer)
+![Definition Reduction Explorer](screenshot.png)
 
 ## What it does
 
@@ -20,7 +20,7 @@ An interactive dictionary tree that lets you drill into the meaning of any conce
 ## Getting started
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/definition-reduction-explorer
+git clone https://github.com/fmue/definition-reduction-explorer
 cd definition-reduction-explorer
 npm install
 npm run dev
@@ -30,7 +30,7 @@ Then open [http://localhost:5173](http://localhost:5173).
 
 ## Deploy to Netlify (one click)
 
-[![Deploy to Netlify](https://www.netlify.com/img/deploy/button.svg)](https://app.netlify.com/start/deploy?repository=https://github.com/YOUR_USERNAME/definition-reduction-explorer)
+[![Deploy to Netlify](https://www.netlify.com/img/deploy/button.svg)](https://app.netlify.com/start/deploy?repository=https://github.com/fmue/definition-reduction-explorer)
 
 Or manually:
 
